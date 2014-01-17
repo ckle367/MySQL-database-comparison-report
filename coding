@@ -1,0 +1,552 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Linq;
+using System.Text;
+using System.Data.Odbc;            // For OleDb object such as: OleDbConnection, OleDbCommand...etc
+using System.IO;
+using System.Net.Mail;
+
+namespace MySQL_database_compare
+{
+    class ClsMain
+    {
+        ConfigXML getConfigPath = new ConfigXML();
+        ConfigXML conf = null;
+
+        string[] displayheader = new string[6];
+        string[] displaytext = new string[6];
+        string oldpath = string.Empty;
+        string newpath = string.Empty;
+        string emailcontent = string.Empty;
+        string tableheader = string.Empty;
+        string subject = string.Empty;
+
+        public ClsMain()
+        {
+            Setting getPath = new Setting();
+            conf = new ConfigXML(getPath.Get_SETTING_CONFIG_FILEPATH());
+        }//end ClsMain
+
+        //create tabeList struct set to value type in table name with their columns name list
+        public struct tableList
+        {
+            public string tableName;
+            public List<string> columnsName;
+
+            //allocate array memory 
+            public void Init()
+            {
+                columnsName = new List<string>();
+            }
+        }
+        //create lessRow and addRow struct set include table name and number of rows
+        public struct lessRow
+        {
+            public string lessTableN;
+            public int lessRowN;
+        }
+
+        public struct addRow
+        {
+            public string addTableN;
+            public int addRowN;
+        }
+
+        public struct Row_tblcount
+        {
+            public string tableName;
+            public int rowNum;
+        }
+
+        public void genMain()
+        {
+            ConfigXML xml = new ConfigXML(@"config.xml");
+            //String Email_body = "";
+            SendMail objSend = new SendMail();
+            string[] mypath = xml.getSettings("/config/setup/path");
+            string[] emailTmplate = xml.getSettings("/config/setup/Tmplate");
+            string[] receiver = xml.getSettings("/config/email/emailList/group");
+            string[] SMTP = xml.getSettings("/config/email/SMTP");
+            string[] Replace = xml.getSettings("/config/Replace");
+            //string prefix = xml.getSettings("/config/setup/prefix")[0];
+            
+
+            string displaycompinfo = string.Empty;
+            //int toUserNum = receiver.Length;
+                    
+
+            DataSet refDS = new DataSet();
+            DataSet compareDS = new DataSet();
+
+            string today_date = DateTime.Today.ToString("yyyyMMdd");
+            string yesterday_date = DateTime.Today.AddDays(-1).ToString("yyyyMMdd");
+            string outputPath = "E:\\Apps\\MySQL_database_compare\\backup\\report_" + today_date + ".csv";
+            string yest_db = "db_" + yesterday_date;
+            string today_db = "db_" + today_date;
+
+            //get the path of mdb files and change to dataset through DB_Tool class
+            DB_Tool mySQLCompareTable = new DB_Tool();
+            refDS = mySQLCompareTable.DBconn(yest_db);
+            compareDS = mySQLCompareTable.DBconn(today_db);
+
+            TblException TblEx = new TblException();
+            //Get the Missing table(s) List
+            List<string> missingTbl = TblEx.TblExcept(refDS, compareDS);
+
+            //Get the new table(s) List
+            List<string> newTbl = TblEx.TblExcept(compareDS, refDS);
+
+            //Get the table which is missing column(s) List
+            List<tableList> missingColumnTbl = ColException(refDS, compareDS);
+
+            //Get the table which is new column(s) List
+            List<tableList> newColumnTbl = ColException(compareDS, refDS);
+
+            //Get the table of number of rows List
+            List<lessRow> rowsOfDelta = CheckDelta(yest_db, today_db);
+            List<addRow> rowsOfNew = CheckNew(yest_db, today_db);
+
+            //write csv format to output path
+            CreateCSVbook(missingTbl, newTbl, missingColumnTbl, newColumnTbl, rowsOfDelta, rowsOfNew, outputPath);
+
+            objSend.SendingMail(emailTmplate[0], receiver[0], SMTP[0], subject, displayheader, displaytext, displaycompinfo);
+
+            //SendMail();
+
+        }
+
+        //Get the columns Exception from 2 dataset (db) each table(s)
+        private List<tableList> ColException(DataSet ds1, DataSet ds2)
+        {
+            //get the Table name and cloumn names into List through "GetTableInfo" method
+            List<tableList> refList = GetTableInfo(ds1);
+            List<tableList> compareList = GetTableInfo(ds2);
+            List<tableList> cList = new List<tableList>();
+
+            //count reference tables and count compare tables
+            int refCount = refList.Count;
+            int compareCount = compareList.Count;
+
+            //find the matching Table Name List and store into new List
+            for (int i = 0; i < refCount; i++)
+            {
+                for (int j = 0; j < compareCount; j++)
+                    //if match the Table name between 2 mdb file
+                    if (refList[i].tableName == compareList[j].tableName)
+                    {
+                        //find the reference table and compare table has how many columns
+                        int refColCnt = refList[i].columnsName.Count;
+                        int compareColCnt = compareList[j].columnsName.Count;
+
+                        //if column size is the same and reference db columns is less than compare db, ignore it.
+                        //Otherwise, Do the Except() method
+                        if (refColCnt > compareColCnt)
+                        {
+                            //Find the change columns name between 2 mdb tables list 
+                            var differenceQuery = refList[i].columnsName.Except(compareList[j].columnsName);
+
+                            tableList matchList = new tableList();
+                            //Add table name and this table columns name into List<string>
+                            matchList.Init();
+                            matchList.tableName = refList[i].tableName.ToString();
+                            foreach (string ml in differenceQuery)
+                            { matchList.columnsName.Add(ml); }
+                            //Add tableList into List <array>
+                            cList.Add(matchList);
+                        }
+                    }
+            }//End of add delta columns and the table(s)
+
+            return cList;
+        }//END of ColException method
+
+        //Get Table names and their columns name list from Dataset to List
+        private List<tableList> GetTableInfo(DataSet ds)
+        {
+            List<tableList> listNew = new List<tableList>();
+            tableList listinfo = new tableList();
+            DataTable dt;
+
+            int dtCnt = ds.Tables.Count;
+            //Add table name on struct method "tableName"
+            for (int i = 0; i < dtCnt; i++)
+            {
+                dt = ds.Tables[i];
+                listinfo.tableName = dt.TableName.ToString();
+                listinfo.Init();
+
+                //Add each column name on list
+                foreach (DataColumn colname in dt.Columns)
+                { listinfo.columnsName.Add(colname.ColumnName.ToString()); }
+                listNew.Add(listinfo);
+            }//End for loop to add to List
+
+            return listNew;
+        }
+
+        //Compare the 2 DB file delta row with same tables name
+        private List<lessRow> CheckDelta(string path1, string path2)
+        {
+            //get the Table name and Row counts into List through "GetTableRow" method
+            List<Row_tblcount> refCount = GetTableRow(path1);
+            List<Row_tblcount> compareCount = GetTableRow(path2);
+            List<lessRow> lR = new List<lessRow>();
+            
+
+            //count reference tables and count compare tables
+            int refCnt = refCount.Count;
+            int compareCnt = compareCount.Count;
+            
+            //find the matching Table Name List and store row of number into new List
+            for (int i = 0; i < refCnt; i++)
+            {
+                for (int j = 0; j < compareCnt; j++)
+                    //while the same table, do the count Rows
+                    if (refCount[i].tableName == compareCount[j].tableName)
+                    {
+
+                        //new definition for Row_tblcount 
+                        lessRow rtc = new lessRow();
+                        //calculate the delta row numbers 
+                        int matchCnt = compareCount[j].rowNum - refCount[i].rowNum;
+                        if (matchCnt < 0)
+                        {
+                            rtc.lessTableN = refCount[i].tableName.ToString();
+                            rtc.lessRowN = matchCnt;
+                        }
+                        //add the Row_tblcount information to List<array>
+                        lR.Add(rtc);
+                    }
+            }
+            lR.Sort((x, y) => { return y.lessRowN.CompareTo(x.lessRowN); });
+            return lR;
+        }
+
+        //Compare the 2 DB file delta row with same tables name
+        private List<addRow> CheckNew(string path1, string path2)
+        {
+            //get the Table name and Row counts into List through "GetTableRow" method
+            List<Row_tblcount> refCount = GetTableRow(path1);
+            List<Row_tblcount> compareCount = GetTableRow(path2);
+            List<addRow> aR = new List<addRow>();
+
+
+            //count reference tables and count compare tables
+            int refCnt = refCount.Count;
+            int compareCnt = compareCount.Count;
+
+            //find the matching Table Name List and store row of number into new List
+            for (int i = 0; i < refCnt; i++)
+            {
+                for (int j = 0; j < compareCnt; j++)
+                    //while the same table, do the count Rows
+                    if (refCount[i].tableName == compareCount[j].tableName)
+                    {
+
+                        //new definition for Row_tblcount 
+                        addRow rtc = new addRow();
+                        //calculate the delta row numbers 
+                        int matchCnt = compareCount[j].rowNum - refCount[i].rowNum;
+                        if (matchCnt > 0)
+                        {
+                            rtc.addTableN = refCount[i].tableName.ToString();
+                            rtc.addRowN = matchCnt;
+                        }
+                        //add the Row_tblcount information to List<array>
+                        aR.Add(rtc);
+                    }
+            }
+            aR.Sort((x, y) => { return y.addRowN.CompareTo(x.addRowN); });
+            return aR;
+        }
+
+        //Count each table rows and output on List
+        private List<Row_tblcount> GetTableRow(string db_Name)
+        {
+            //Get the database file from path to dataset through CountRow method of DB_tool class
+            DB_Tool mySQLCompare = new DB_Tool();
+            DataSet cntDS = mySQLCompare.CountRow(db_Name);
+
+            //create New List for Row_tblcount struct
+            List<Row_tblcount> listNew = new List<Row_tblcount>();
+            Row_tblcount listInfo = new Row_tblcount();
+            //Get total of tables in dataset and store table name and number of rows in List
+            int dtCnt = cntDS.Tables.Count;
+            for (int i = 0; i < dtCnt; i++)
+            {
+                DataTable dt = cntDS.Tables[i];
+                listInfo.tableName = dt.TableName.ToString();
+                listInfo.rowNum = int.Parse(dt.Rows[0].ItemArray[0].ToString());
+                //add the set of Row_tblcount[i] into List array "listNew"
+                listNew.Add(listInfo);
+            }//End for loop to add to List
+            return listNew;
+        }
+
+        //create csv file from location path and store all result in csv
+        public void CreateCSVbook(List<string> missTbl, List<string> newTbl, List<tableList> missColTbl, List<tableList> newColTbl, List<lessRow> rowCntTbl, List<addRow> rowAddTbl, string strFilePath)
+        {
+            subject = "File Checking";
+            try
+            {
+                //variable the stream writer and store once time
+                StreamWriter sw = new StreamWriter(strFilePath, false);
+
+                int i= 0;
+                foreach (var t in missTbl) i++;
+                displayheader[0] = tableheader;
+                displaytext[0] = emailcontent;
+                tableheader = string.Empty;
+                emailcontent = string.Empty;
+
+                //List the missing table(s) for compare database
+                if (i != 0)
+                {
+                    tableheader += "<TABLE><TBODY><H1><strong>The missing Table's on today: </strong></H1><tr>";
+                    
+                    //Email_body += "The missing Table's on today: \r\n";
+                    sw.Write("The missing Table(s) on today" + "\r\n");
+                    foreach (string dr in missTbl)
+                    {
+                        sw.Write(dr.ToString());
+                        sw.Write(sw.NewLine);
+                        emailcontent += "<tr>";
+                        emailcontent += "<td>" + dr.ToString() + "</td>";
+                    }//end of for loop
+                    sw.Write(sw.NewLine);
+                    emailcontent += "</TBODY></TABLE></br>";
+                }
+
+                int j = 0;
+                foreach (var t in newTbl) j++;
+                displayheader[1] = tableheader;
+                displaytext[1] = emailcontent;
+                tableheader = string.Empty;
+                emailcontent = string.Empty;
+                //List the new table(s) for compare database
+                if (j != 0)
+                {
+                    tableheader = "<TABLE><TBODY><H1><strong>The new Table's on today   :</strong></H1><tr>";
+                    //Email_body += "The new Table's on today: \r\n";
+                    sw.Write("The new Table(s) on today" + "\r\n");
+                    foreach (string dr in newTbl)
+                    {
+                        emailcontent += "<tr>";
+                        emailcontent += "<td>" + dr.ToString() + "</td>";
+                        sw.Write(dr.ToString());
+                        sw.Write(sw.NewLine);
+                        
+                    }//end of for loop
+                    sw.Write(sw.NewLine);
+                    emailcontent += "</TBODY></TABLE></br>";
+                }
+
+                int k = 0;
+                foreach (var t in missColTbl) k++;
+                displayheader[2] = tableheader;
+                displaytext[2] = emailcontent;
+                tableheader = string.Empty;
+                emailcontent = string.Empty;
+                //List the common table(s) have missing column(s)
+                if (k != 0)
+                {
+                    tableheader = "<TABLE><TBODY><H1><strong>The missing Table's column(s) on today   :</strong></H1><tr>";
+                    tableheader += "<th>" + "Table name" + "</th>";
+                    tableheader += "<th>" + "The name of missing table column(s)" + "</th></tr>";
+                    //Email_body += "The missing Table's column(s) on today: \r\n";
+                    sw.Write("The missing Table's column(s) on today" + "\r\n");
+                    foreach (tableList strArr in missColTbl)
+                    {
+                        if (strArr.ToString() != "")
+                        {
+                            sw.Write(strArr.tableName);
+                            sw.Write(",");
+                            sw.WriteLine(string.Join(",", strArr.columnsName.ToArray()));
+                            emailcontent += "<tr>";
+                            emailcontent += "<td>" + strArr.tableName + "</td>";
+                            emailcontent += "<td>" + string.Join(",", strArr.columnsName.ToArray()) + "</td>";
+                            //Email_body += strArr.tableName + " : " + string.Join(",", strArr.columnsName.ToArray()) + "\r\n";
+                        }
+
+                    }
+                    sw.Write(sw.NewLine);
+                    emailcontent += "</TBODY></TABLE></br>";
+                }
+
+                int l = 0;
+                foreach (var t in newColTbl) l++;
+                displayheader[3] = tableheader;
+                displaytext[3] = emailcontent;
+                tableheader = string.Empty;
+                emailcontent = string.Empty;
+                //List the common table(s) have new column(s)
+                if (l != 0)
+                {
+                    tableheader = "<TABLE><TBODY><H1><strong>The new column(s) of Table(s) on today   :</strong></H1><tr>";
+                    tableheader += "<th>" + "Table Name" + "</th>";
+                    tableheader += "<th>" + "The name of new table column(s)" + "</th></tr>";
+                    //Email_body += "The new Table's column(s) on today: \r\n";
+                    sw.Write("The new Table's column(s) on today" + "\r\n");
+                    foreach (tableList dr in newColTbl)
+                    {
+                        if (dr.ToString() != "")
+                        {
+                            sw.Write(dr.tableName);
+                            sw.Write(",");
+                            sw.WriteLine(string.Join(",", (dr.columnsName).ToArray()));
+                            emailcontent += "<tr>";
+                            emailcontent += "<td>" + dr.tableName + "</td>";
+                            emailcontent += "<td>" + string.Join(",", dr.columnsName.ToArray()) + "</td>";
+                            //Email_body += dr.tableName + " : " + string.Join(",", dr.columnsName.ToArray()) + "\r\n";
+                        }
+                        else
+                            sw.WriteLine("no delta");
+                       
+
+                    }//end of for loop
+                    sw.Write(sw.NewLine);
+                    emailcontent += "</TBODY></TABLE></br>";
+                }
+
+                int m = 0;
+                foreach (var t in rowCntTbl) m++;
+                displayheader[4] = tableheader;
+                displaytext[4] = emailcontent;
+                tableheader = string.Empty;
+                emailcontent = string.Empty;
+                //List the common table(s) have new column(s)
+                if (m != 0)
+                {
+                    //Email_body += "\r\n";
+                    //List the common table(s) different number of rows or not
+                    tableheader = "<TABLE><TBODY><H1><strong>The missing number(s) of rows on today table(s)  :</strong></H1><tr>";
+                    tableheader += "<th>" + "Table Name" + "</th>";
+                    tableheader += "<th>" + "Number of row(s) is missing" + "</th></tr>";
+                   // Email_body += "The missing of number of table rows on today: \r\n";
+                    sw.Write("The missing of number of table rows on today" + "\r\n");
+                    //Email_body += "\r\n";
+                    foreach (lessRow rt in rowCntTbl)
+                    {
+                        if (rt.lessRowN != 0)
+                        {
+                            sw.Write(rt.lessTableN);
+                            sw.Write(",");
+                            sw.WriteLine(rt.lessRowN);
+                            emailcontent += "<tr>";
+                            emailcontent += "<td>" + rt.lessTableN + "</td>";
+                            emailcontent += "<td>" + rt.lessRowN + "</td>";
+                            //Email_body += "\r\n";
+                            //Email_body += rt.lessTableN + " : " + rt.lessRowN + "\r\n";
+                        }
+                    }//end of for loop
+                    emailcontent += "</TBODY></TABLE></br>";
+                }
+
+                int n = 0;
+                foreach (var t in rowAddTbl) n++;
+                displayheader[5] = tableheader;
+                displaytext[5] = emailcontent;
+                tableheader = string.Empty;
+                emailcontent = string.Empty;
+                //List the common table(s) have new column(s)
+                if (n != 0)
+                {
+                    tableheader = "<TABLE><TBODY><H1><strong>The number(s) of new rows on today table(s) :</strong></H1><tr>";
+                    tableheader += "<th>" + "Table Name" + "</th>";
+                    tableheader += "<th>" + "The number of new row(s)" + "</th></tr>";
+                    //List the common table(s) different number of rows or not
+                    //Email_body += "The New add of number of table rows on today: \r\n";
+                    sw.Write("The new add of number of table rows on today" + "\r\n");
+                    foreach (addRow at in rowAddTbl)
+                    {
+                        if (at.addRowN != 0)
+                        {
+                            sw.Write(at.addTableN);
+                            sw.Write(",");
+                            sw.WriteLine(at.addRowN);
+                            emailcontent += "<tr>";
+                            emailcontent += "<td>" + at.addTableN + "</td>";
+                            emailcontent += "<td>" + at.addRowN + "</td>";
+                            //Email_body += Environment.NewLine;
+                            //Email_body += at.addTableN + " : " + at.addRowN+"\r\n";
+                        }
+                    }//end of for loop
+                    emailcontent += "</TBODY></TABLE></br>";
+                }
+                sw.Close();
+                displayheader[6] = tableheader;
+                displaytext[6] = emailcontent;
+
+                
+            }
+            catch (Exception ex)
+            {
+                
+            }
+        }
+
+        /// <summary>
+        /// send Email to user with attached file in path
+        /// </summary>
+        /// <param name="attachedFile"></param>
+        /*private void SendMail()
+        {
+            //get the Config.xml for find the path
+            ConfigXML xml = new ConfigXML(@"config.xml");
+            string[] emailTo = xml.getSettings("/config/email/emailList/group");
+            string[] emailCC = xml.getSettings("/config/email/emailList_CC/group");
+            string[] emailSubject = xml.getSettings("/config/email/Subject");
+            string[] emailFrom = xml.getSettings("/config/email/From");
+            string[] emailFooter = xml.getSettings("/config/email/Footer");
+
+            int toUserNum = emailTo.Length;
+            int ccUserNum = emailCC.Length;
+
+            try
+            {
+                string v_smtpAddress = "XXX.XXX.XXX.XXX";//SMTP address
+                string v_sendMailAddress = emailFrom[0];//Sender Email
+                string v_mailSubject = emailSubject[0];//Email subject
+                String EmailBody = "Dear Sir,\r\n" + Environment.NewLine + "Today database update status.\r\n"+Email_body+"\r\n";
+
+                SmtpClient smtp = new SmtpClient(v_smtpAddress);
+                MailMessage mes = new MailMessage();
+
+                mes.From = new MailAddress(v_sendMailAddress);
+
+                for (int i = 0; i < toUserNum; i++)
+                {
+                    if (emailTo[i] != "")
+                    {
+                        mes.To.Add(emailTo[i]); //Mail to receiver 1          
+                    }
+                }
+                for (int j = 0; j < ccUserNum; j++)
+                {
+                    if (emailCC[j] != "")
+                    {
+                        mes.CC.Add(emailCC[j]); //Mail CC to receiver 2
+                    }
+                }
+                mes.Subject = v_mailSubject;
+                mes.Body = EmailBody + Environment.NewLine + emailFooter[0];
+                mes.IsBodyHtml = false;//not use HTML format
+
+                //attach file from path and add into mail
+                //System.Net.Mail.Attachment mailAttach_1 = new Attachment(attachedFile);
+                //mes.Attachments.Add(mailAttach_1);
+
+                //Send mail
+                smtp.Send(mes);
+                //mailAttach_1.Dispose();//Dispose attached file memory
+            }
+            catch (Exception ex)
+            {
+
+            }
+        }*/
+    }
+}
